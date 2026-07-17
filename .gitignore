@@ -1,0 +1,35 @@
+# Data files (CSV cache, 99 ETF files)
+data/
+
+# SQLite database
+db/aitorearn.db
+
+# Results (backtest outputs)
+results/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Screenshots
+*.png
+
+# Playwright
+.playwright-mcp/
+
+# Environment
+.env
+venv/
+.venv/
+
+# Logs
+*.log
+nohup.out

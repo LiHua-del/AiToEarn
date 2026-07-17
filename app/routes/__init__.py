@@ -1,0 +1,1 @@
+# AiToEarn app routes

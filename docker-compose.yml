@@ -1,0 +1,18 @@
+version: "3.8"
+services:
+  aitoearn:
+    build: .
+    container_name: aitoearn
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - aitoearn-db:/app/db
+      - aitoearn-data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - HOST=0.0.0.0
+
+volumes:
+  aitoearn-db:
+  aitoearn-data:
