@@ -29,6 +29,8 @@ from core.data_fetcher import (
 from core.validator import validate_all_etfs, generate_quality_report
 from core.indicators import score_all_etfs
 from core.backtest import update_backtest_results, update_backtest_v2
+from core.risk_control import calc_deviation_on_date, LayeredStopLossManager
+from db.models import RiskControlLogModel
 
 
 def run_update(session='final', target_date=None):
@@ -55,7 +57,7 @@ def run_update(session='final', target_date=None):
     print(f"=" * 60)
 
     # 1. 获取标的池
-    print("\n[1/4] 获取 ETF 标的池...")
+    print("\n[1/5] 获取 ETF 标的池...")
     try:
         pool, full_name_map = get_etf_pool()
         print(f"  标的池: {len(pool)} 只 ETF")
@@ -64,7 +66,7 @@ def run_update(session='final', target_date=None):
         return {'status': 'error', 'step': 'get_pool', 'error': str(e)}
 
     # 2. 增量更新数据
-    print(f"\n[2/4] 增量更新 ETF 历史数据...")
+    print(f"\n[2/5] 增量更新 ETF 历史数据...")
     success, fail, failed_codes = update_all_etf_data(pool, target_date)
     print(f"  成功: {success}, 失败: {fail}")
     if failed_codes:
@@ -74,7 +76,7 @@ def run_update(session='final', target_date=None):
             print(f"    ... 及其他 {len(failed_codes) - 5} 只")
 
     # 3. 数据质量校验
-    print(f"\n[3/4] 数据质量校验...")
+    print(f"\n[3/5] 数据质量校验...")
     valid_codes = []
     for f in os.listdir(DATA_DIR):
         if f.endswith('.csv') and not f.startswith('.'):
@@ -123,8 +125,8 @@ def run_update(session='final', target_date=None):
         cross_check_result=cross_check_result,
     )
 
-    # 4. 评分 + 回测
-    print(f"\n[4/4] 计算评分 & 更新回测...")
+    # 4. 评分 + 回测 + 风控
+    print(f"\n[4/5] 计算评分 & 更新回测...")
 
     # 加载数据
     data = {}
@@ -146,9 +148,11 @@ def run_update(session='final', target_date=None):
         # 打印 Top 5
         print(f"\n  Top 5 (方案B):")
         for i, s in enumerate(scores[:5]):
+            final_key = 'score_final_b'
             print(f"    {s['rank_b']}. {s['code']} {s['name']} "
-                  f"板块={s['sector']} 评分={s['score_b']} "
-                  f"涨幅={s['gain_20d']}% 涨天={s['up_days_20d']}")
+                  f"板块={s['sector']} 原始评分={s['score_b']} 最终评分={s.get(final_key, s['score_b'])} "
+                  f"涨幅={s['gain_20d']}% 涨天={s['up_days_20d']} "
+                  f"乖离率={s.get('deviation_20d', 'N/A')}")
 
     # 回测更新（仅收盘后做完整回测）
     if session == 'final':
@@ -172,6 +176,104 @@ def run_update(session='final', target_date=None):
                       f"夏普{st['sharpe']:.2f} 最大回撤{st['max_dd']:.2f}%")
         except Exception as e:
             print(f"  V2回测更新失败: {e}")
+
+    # 5. 风控检查
+    print(f"\n[5/5] 风控检查...")
+    if session == 'final' and scores:
+        # 对齐数据（复用评分时的 closes）
+        from core.indicators import calc_ma5, calc_ma60
+        all_dates = sorted(set().union(*[set(df.index) for df in data.values()]))
+        date_index = pd.DatetimeIndex(all_dates)
+        closes_check = pd.DataFrame(index=date_index)
+        for code, df in data.items():
+            closes_check[code] = df['close'].reindex(date_index).ffill()
+        ma5_check = closes_check.apply(calc_ma5)
+        ma60_check = closes_check.apply(calc_ma60)
+
+        score_date_str = latest_trade_day if session == 'final' else target_date.strftime('%Y-%m-%d')
+        check_date = pd.Timestamp(score_date_str)
+
+        for scheme in ['A', 'B', 'C']:
+            # 获取当前持仓（从 trade_history）
+            from db.models import TradeHistoryModel
+            current_holdings, _ = TradeHistoryModel.get_current_holdings_with_price(scheme)
+
+            if not current_holdings:
+                # 无持仓，记录正常
+                RiskControlLogModel.add(
+                    date=score_date_str, scheme=scheme,
+                    layer='portfolio', action='normal',
+                    details={'msg': '无持仓'}
+                )
+                continue
+
+            # 构建持仓 dict 供风控检查
+            holdings_dict = {}
+            price_data = {}
+            ma5_data = {}
+            for h in current_holdings:
+                code = h['etf_code']
+                holdings_dict[code] = {
+                    'shares': h['shares'],
+                    'cost_price': h['price'],
+                    'name': h['etf_name'],
+                }
+                if code in closes_check.columns and check_date in closes_check.index:
+                    price_data[code] = float(closes_check.loc[check_date, code])
+                if code in ma5_check.columns and check_date in ma5_check.index:
+                    m5 = ma5_check.loc[check_date, code]
+                    if pd.notna(m5):
+                        ma5_data[code] = float(m5)
+
+            # 计算总资产
+            total_asset = sum(
+                holdings_dict[c]['shares'] * price_data.get(c, holdings_dict[c]['cost_price'])
+                for c in holdings_dict
+            )
+
+            # 运行风控检查
+            mgr = LayeredStopLossManager()
+            risk_result = mgr.run_daily_check(
+                holdings_dict, price_data, ma5_data, total_asset,
+                date=score_date_str
+            )
+
+            # 记录日志
+            if risk_result['final_action'] != 'normal':
+                # 个股层
+                for code, ind_res in risk_result['individual_results'].items():
+                    if ind_res['triggered']:
+                        RiskControlLogModel.add(
+                            date=score_date_str, scheme=scheme,
+                            layer='individual', action='reduce',
+                            etf_code=code,
+                            details={
+                                'below_days': ind_res['below_days'],
+                                'reduce_to': ind_res['reduce_to'],
+                                'buffer_pct': ind_res['buffer_pct'],
+                            }
+                        )
+                        print(f"  ⚠ [{scheme}] 个股止损: {code} 连续{ind_res['below_days']}日低于MA5 → 减仓至{ind_res['reduce_to']*100:.0f}%")
+
+                # 组合层
+                if risk_result['portfolio_result']['triggered']:
+                    RiskControlLogModel.add(
+                        date=score_date_str, scheme=scheme,
+                        layer='portfolio', action='liquidate',
+                        details={
+                            'drawdown': risk_result['portfolio_result']['drawdown'],
+                            'peak_nav': risk_result['portfolio_result']['peak_nav'],
+                            'current_nav': risk_result['portfolio_result']['current_nav'],
+                        }
+                    )
+                    print(f"  🚨 [{scheme}] 组合止损: 回撤{risk_result['portfolio_result']['drawdown']*100:.1f}% 超过阈值 → 清仓")
+            else:
+                RiskControlLogModel.add(
+                    date=score_date_str, scheme=scheme,
+                    layer='portfolio', action='normal',
+                    details={'msg': '风控检查正常'}
+                )
+                print(f"  ✓ [{scheme}] 风控检查正常")
 
     print(f"\n{'=' * 60}")
     print(f"  更新完成!")

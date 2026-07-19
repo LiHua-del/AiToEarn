@@ -5,7 +5,7 @@ services:
     container_name: aitoearn
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5001:5001"
     volumes:
       - aitoearn-db:/app/db
       - aitoearn-data:/app/data

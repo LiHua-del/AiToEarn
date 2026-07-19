@@ -290,7 +290,9 @@ class ScoreHistoryModel:
     def save_batch(date, session, scores):
         """批量保存评分数据
         scores: list of dict with keys: code, name, sector, gain_20d, up_days_20d,
-                score_a, score_b, score_c, above_ma60, rank_a, rank_b, rank_c
+                score_a, score_b, score_c, deviation_20d, deviation_median,
+                deviation_penalty, score_final_a, score_final_b, score_final_c,
+                above_ma60, rank_a, rank_b, rank_c
         """
         conn = get_conn()
         try:
@@ -302,12 +304,17 @@ class ScoreHistoryModel:
                 conn.execute(
                     """INSERT INTO score_history
                        (date, session, code, name, sector, gain_20d, up_days_20d,
-                        score_a, score_b, score_c, above_ma60, rank_a, rank_b, rank_c)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        score_a, score_b, score_c,
+                        deviation_20d, deviation_median, deviation_penalty,
+                        score_final_a, score_final_b, score_final_c,
+                        above_ma60, rank_a, rank_b, rank_c)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (date, session,
                      s['code'], s.get('name', ''), s.get('sector', ''),
                      s.get('gain_20d', 0), s.get('up_days_20d', 0),
                      s.get('score_a', 0), s.get('score_b', 0), s.get('score_c', 0),
+                     s.get('deviation_20d'), s.get('deviation_median'), s.get('deviation_penalty', 0),
+                     s.get('score_final_a', 0), s.get('score_final_b', 0), s.get('score_final_c', 0),
                      s.get('above_ma60', 0),
                      s.get('rank_a', 0), s.get('rank_b', 0), s.get('rank_c', 0))
                 )
@@ -608,5 +615,54 @@ class TradeHistoryModel:
                 (scheme, latest_date)
             ).fetchall()
             return [dict(r) for r in rows], latest_date
+        finally:
+            conn.close()
+
+
+# ============================================================
+# RiskControlLogModel — 风控日志
+# ============================================================
+class RiskControlLogModel:
+    @staticmethod
+    def add(date, scheme, layer, action, etf_code='', details=''):
+        """记录风控事件"""
+        conn = get_conn()
+        try:
+            details_json = json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
+            conn.execute(
+                """INSERT INTO risk_control_log
+                   (date, scheme, layer, action, etf_code, details)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (date, scheme, layer, action, etf_code, details_json)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_latest(scheme='B', limit=20):
+        """获取最近的风控事件"""
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM risk_control_log WHERE scheme = ?
+                   ORDER BY date DESC, id DESC LIMIT ?""",
+                (scheme, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_by_date(date, scheme='B'):
+        """获取某日的风控事件"""
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM risk_control_log WHERE date = ? AND scheme = ?
+                   ORDER BY id""",
+                (date, scheme)
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()

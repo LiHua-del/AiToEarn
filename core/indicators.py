@@ -6,7 +6,8 @@ AiToEarn 策略指标计算
 import numpy as np
 import pandas as pd
 
-from config import WEIGHTS, N_TOP
+from config import WEIGHTS, N_TOP, DEVIATION_WEIGHTS
+from core.risk_control import calc_deviation_on_date
 
 
 # ============================================================
@@ -16,6 +17,16 @@ from config import WEIGHTS, N_TOP
 def calc_ma60(prices):
     """60 日移动均线"""
     return prices.rolling(window=60, min_periods=60).mean()
+
+
+def calc_ma5(prices):
+    """5 日移动均线"""
+    return prices.rolling(window=5, min_periods=5).mean()
+
+
+def calc_ma20(prices):
+    """20 日移动均线"""
+    return prices.rolling(window=20, min_periods=20).mean()
 
 
 def calc_20d_gain(prices):
@@ -34,6 +45,15 @@ def calc_ma60_pct_above(price, ma60):
     if pd.isna(price) or pd.isna(ma60) or ma60 == 0:
         return np.nan
     return (price / ma60 - 1) * 100
+
+
+def calc_deviation_rate(close_series, ma_period=20):
+    """
+    计算乖离率 = (close - MA) / MA × 100
+    """
+    ma = close_series.rolling(window=ma_period, min_periods=ma_period).mean()
+    deviation = (close_series - ma) / ma * 100
+    return deviation
 
 
 # ============================================================
@@ -93,13 +113,17 @@ def get_etf_name_map(etf_pool):
 # 批量评分（最新一天，用于仪表盘排行）
 # ============================================================
 
-def score_all_etfs(etf_pool, valid_codes, data, target_date=None, extra_name_map=None):
+def score_all_etfs(etf_pool, valid_codes, data, target_date=None, extra_name_map=None,
+                   apply_deviation=True):
     """
     对给定日期的所有有效 ETF 进行评分
     返回: list of dict，按方案B评分降序排列
          [{code, name, sector, gain_20d, up_days_20d, score_a, score_b, score_c,
+           deviation_20d, deviation_median, deviation_penalty,
+           score_final_a, score_final_b, score_final_c,
            above_ma60, rank_a, rank_b, rank_c}]
     extra_name_map: 额外的 code->name 映射（如全量 ETF 快照），补充 pool 中不存在的 ETF
+    apply_deviation: 是否应用乖离率评分惩罚
     """
     if not data:
         return []
@@ -133,6 +157,11 @@ def score_all_etfs(etf_pool, valid_codes, data, target_date=None, extra_name_map
             if code not in name_map:
                 name_map[code] = name
 
+    # 计算乖离率（对所有 ETF）
+    deviations = {}
+    if apply_deviation:
+        deviations = calc_deviation_on_date(closes, target_date)
+
     score_results = []
     for code in closes.columns:
         try:
@@ -159,7 +188,7 @@ def score_all_etfs(etf_pool, valid_codes, data, target_date=None, extra_name_map
             name = name_map.get(code, code)
             sector = classify_sector(name)
 
-            score_results.append({
+            result_item = {
                 'code': code,
                 'name': name,
                 'sector': sector,
@@ -171,18 +200,62 @@ def score_all_etfs(etf_pool, valid_codes, data, target_date=None, extra_name_map
                 'score_b': round(score_b, 2),
                 'score_c': round(score_c, 2),
                 'above_ma60': above_ma60,
-            })
+            }
+
+            # 乖离率数据
+            result_item['deviation_20d'] = deviations.get(code)
+
+            score_results.append(result_item)
         except Exception:
             continue
 
-    # 排序赋排名
-    for rank_key, score_key in [('rank_a', 'score_a'), ('rank_b', 'score_b'), ('rank_c', 'score_c')]:
-        sorted_results = sorted(score_results, key=lambda x: x[score_key], reverse=True)
+    # 应用乖离率评分惩罚
+    if apply_deviation and deviations:
+        # 对三套方案分别计算 score_final
+        for scheme in ['A', 'B', 'C']:
+            w3 = DEVIATION_WEIGHTS.get(scheme, DEVIATION_WEIGHTS['B'])
+            score_key = f'score_{scheme.lower()}'
+            final_key = f'score_final_{scheme.lower()}'
+
+            # 计算中位数
+            dev_values = [s['deviation_20d'] for s in score_results
+                          if s['deviation_20d'] is not None]
+            if dev_values:
+                median_dev = float(np.median(dev_values))
+                for s in score_results:
+                    s['deviation_median'] = round(median_dev, 4)
+                    dev = s['deviation_20d']
+                    if dev is not None and dev > median_dev:
+                        penalty = w3 * (dev - median_dev)
+                        s['deviation_penalty'] = round(penalty, 4)
+                    else:
+                        s['deviation_penalty'] = 0.0
+                    original_score = s.get(score_key, 0)
+                    s[final_key] = round(original_score - s['deviation_penalty'], 4)
+            else:
+                for s in score_results:
+                    s['deviation_median'] = None
+                    s['deviation_penalty'] = 0.0
+                    s[final_key] = s.get(score_key, 0)
+    else:
+        for s in score_results:
+            s['deviation_20d'] = None
+            s['deviation_median'] = None
+            s['deviation_penalty'] = 0.0
+            s['score_final_a'] = s.get('score_a', 0)
+            s['score_final_b'] = s.get('score_b', 0)
+            s['score_final_c'] = s.get('score_c', 0)
+
+    # 排序赋排名（使用 score_final 排名）
+    for rank_key, final_key in [('rank_a', 'score_final_a'),
+                                ('rank_b', 'score_final_b'),
+                                ('rank_c', 'score_final_c')]:
+        sorted_results = sorted(score_results, key=lambda x: x[final_key], reverse=True)
         for rank, item in enumerate(sorted_results, 1):
             item[rank_key] = rank
 
-    # 最终按方案B排序返回
-    score_results.sort(key=lambda x: x['score_b'], reverse=True)
+    # 最终按方案B的 score_final 排序返回
+    score_results.sort(key=lambda x: x['score_final_b'], reverse=True)
     return score_results
 
 

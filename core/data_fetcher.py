@@ -219,14 +219,15 @@ def get_cache_info(code):
 
 
 def load_cached_data(code):
-    """加载缓存数据"""
+    """加载缓存数据（自动做前复权处理）"""
     filepath = os.path.join(DATA_DIR, f"{code}.csv")
     if not os.path.exists(filepath):
         return None
     try:
         df = pd.read_csv(filepath, index_col=0, parse_dates=True)
         if len(df) >= MIN_DATA_ROWS:
-            return df
+            from core.adjust import forward_adjust
+            return forward_adjust(df)
         return None
     except Exception:
         return None

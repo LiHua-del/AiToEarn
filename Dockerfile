@@ -16,6 +16,6 @@ COPY . .
 # 数据目录（由 volume 挂载，首次启动自动初始化）
 VOLUME /app/db /app/data
 
-EXPOSE 5000
+EXPOSE 5001
 
 CMD ["python", "app.py"]

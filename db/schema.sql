@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS score_history (
     score_a REAL DEFAULT 0,           -- 方案A评分
     score_b REAL DEFAULT 0,           -- 方案B评分
     score_c REAL DEFAULT 0,           -- 方案C评分
+    deviation_20d REAL DEFAULT NULL,  -- 20日乖离率 (%)
+    deviation_median REAL DEFAULT NULL,-- 当日所有ETF乖离率中位数
+    deviation_penalty REAL DEFAULT 0, -- 乖离率评分惩罚值
+    score_final_a REAL DEFAULT 0,     -- 方案A最终评分(含惩罚)
+    score_final_b REAL DEFAULT 0,     -- 方案B最终评分(含惩罚)
+    score_final_c REAL DEFAULT 0,     -- 方案C最终评分(含惩罚)
     above_ma60 INTEGER DEFAULT 0,     -- 0|1
     rank_a INTEGER DEFAULT 0,
     rank_b INTEGER DEFAULT 0,
@@ -95,6 +101,18 @@ CREATE TABLE IF NOT EXISTS trade_history (
     scheme TEXT NOT NULL DEFAULT 'B'  -- 'A' | 'B' | 'C'
 );
 
+-- 风控日志
+CREATE TABLE IF NOT EXISTS risk_control_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,               -- 检查日期 YYYY-MM-DD
+    scheme TEXT NOT NULL DEFAULT 'B', -- 'A' | 'B' | 'C'
+    layer TEXT NOT NULL,              -- 'individual' | 'portfolio'
+    action TEXT NOT NULL,             -- 'normal' | 'reduce' | 'liquidate'
+    etf_code TEXT DEFAULT '',         -- 触发的 ETF 代码（组合层为空）
+    details TEXT DEFAULT '',          -- JSON 详情
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(trade_date);
 CREATE INDEX IF NOT EXISTS idx_trades_code ON trades(etf_code);
@@ -102,3 +120,4 @@ CREATE INDEX IF NOT EXISTS idx_score_date ON score_history(date, session);
 CREATE INDEX IF NOT EXISTS idx_equity_date ON equity_curve(date);
 CREATE INDEX IF NOT EXISTS idx_equity_v2_date ON equity_curve_v2(date);
 CREATE INDEX IF NOT EXISTS idx_trade_history_date ON trade_history(date, scheme);
+CREATE INDEX IF NOT EXISTS idx_risk_control_date ON risk_control_log(date, scheme);

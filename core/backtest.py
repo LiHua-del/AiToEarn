@@ -10,9 +10,10 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from config import DATA_DIR, WEIGHTS, N_TOP, TRADE_COST
+from config import DATA_DIR, WEIGHTS, N_TOP, TRADE_COST, DEVIATION_WEIGHTS
 from core.data_fetcher import load_cached_data, get_etf_pool, extract_core_keyword
-from core.indicators import calc_ma60, calc_20d_gain, calc_up_days, calc_all_scores, classify_sector
+from core.indicators import calc_ma60, calc_ma5, calc_20d_gain, calc_up_days, calc_all_scores, calc_deviation_rate, classify_sector
+from core.risk_control import LayeredStopLossManager
 from db.models import EquityCurveModel, EquityCurveV2Model, TradeHistoryModel, get_conn
 
 
@@ -79,7 +80,7 @@ def calc_stats(equity, turnover, total_reb, late_entry, n_top):
 
 def run_backtest(etf_pool, valid_codes, scheme='B'):
     """
-    运行回测
+    运行回测（含乖离率评分惩罚 — 三因子模型）
     参数: etf_pool=标的池 DataFrame, valid_codes=有效代码列表, scheme='A'/'B'/'C'
     返回: {
         'equity_series': pd.Series,      # 每日净值
@@ -90,6 +91,7 @@ def run_backtest(etf_pool, valid_codes, scheme='B'):
     """
     w = WEIGHTS.get(scheme, WEIGHTS['B'])
     w1, w2_val = w['w1'], w['w2']
+    w3 = DEVIATION_WEIGHTS.get(scheme, DEVIATION_WEIGHTS['B'])
     label = w['label']
 
     data = load_etf_data(valid_codes)
@@ -155,7 +157,8 @@ def run_backtest(etf_pool, valid_codes, scheme='B'):
                 fri_opens = opens.loc[fri]
                 fri_ma60 = ma60.loc[fri] if fri in ma60.index else None
 
-                scores = {}
+                # 第一遍：收集基础评分 + 乖离率
+                raw_scores = {}  # code -> (gain, up, deviation_20d)
                 for code in closes.columns:
                     try:
                         price_now = fri_closes[code]
@@ -176,30 +179,49 @@ def run_backtest(etf_pool, valid_codes, scheme='B'):
                         if pd.isna(gain) or pd.isna(up):
                             continue
 
-                        scores[code] = (gain, up)
+                        # 计算乖离率
+                        dev = None
+                        if len(code_closes) >= 20:
+                            dev_series = calc_deviation_rate(code_closes, ma_period=20)
+                            if pd.notna(dev_series.iloc[-1]):
+                                dev = float(dev_series.iloc[-1])
+
+                        raw_scores[code] = (gain, up, dev)
                     except Exception:
                         continue
 
-                if scores:
-                    # 按板块分组取最佳
+                # 第二遍：计算中位数并应用乖离率惩罚
+                if raw_scores:
+                    dev_values = [v[2] for v in raw_scores.values() if v[2] is not None]
+                    median_dev = float(np.median(dev_values)) if dev_values else 0
+
+                    # 计算最终评分
+                    scored_items = {}  # code -> (gain, up, final_score)
+                    for code, (gain, up, dev) in raw_scores.items():
+                        base_score = w1 * gain + w2_val * up
+                        if dev is not None and dev > median_dev:
+                            penalty = w3 * (dev - median_dev)
+                        else:
+                            penalty = 0
+                        final_score = base_score - penalty
+                        scored_items[code] = (gain, up, final_score)
+
+                    # 按板块分组取最佳（用 final_score）
                     sector_best = {}
-                    for code, (gain, up) in scores.items():
+                    for code, (gain, up, final_score) in scored_items.items():
                         sector = get_sector(etf_pool, code)
-                        sector_best.setdefault(sector, []).append((code, gain, up))
+                        if sector not in sector_best or final_score > sector_best[sector][2]:
+                            sector_best[sector] = (code, gain, up, final_score)
 
-                    candidates = []
-                    for sector, items in sector_best.items():
-                        best = max(items, key=lambda x: w1 * x[1] + w2_val * x[2])
-                        candidates.append(best)
-
-                    candidates.sort(key=lambda x: w1 * x[1] + w2_val * x[2], reverse=True)
+                    candidates = list(sector_best.values())
+                    candidates.sort(key=lambda x: x[3], reverse=True)
                     top = candidates[:n_top]
 
-                    new_holdings = {code: 1.0 / n_top for code, _, _ in top}
+                    new_holdings = {item[0]: 1.0 / n_top for item in top}
 
                     # 末段入场统计
-                    for code, gain, up in top:
-                        if up < 8:
+                    for item in top:
+                        if item[2] < 8:
                             late_entry_count += 1
 
                     # 换手计数
@@ -214,7 +236,7 @@ def run_backtest(etf_pool, valid_codes, scheme='B'):
                         'date': mon.strftime('%Y-%m-%d'),
                         'week_fri': fri.strftime('%Y-%m-%d'),
                     }
-                    for j, (code, gain, up) in enumerate(top):
+                    for j, (code, gain, up, final_score) in enumerate(top):
                         name_row = etf_pool[etf_pool['code'] == code] if etf_pool is not None else None
                         name = name_row.iloc[0]['name'] if (name_row is not None and len(name_row) > 0) else code
                         holding_record[f'top{j+1}_code'] = code
@@ -390,10 +412,12 @@ def _get_year_first_trade_day(date_index, year):
 def _score_etfs_on_date(closes_df, opens_df, ma60_df, etf_pool, date, scheme, extra_name_map=None):
     """
     对给定日期进行评分，返回板块去重后的 Top3
-    返回: list of {code, name, score, gain, up_days}
+    包含乖离率评分惩罚（第三因子）
+    返回: list of {code, name, score, gain, up_days, deviation_20d, price}
     """
     w = WEIGHTS.get(scheme, WEIGHTS['B'])
     w1, w2_val = w['w1'], w['w2']
+    w3 = DEVIATION_WEIGHTS.get(scheme, DEVIATION_WEIGHTS['B'])
 
     if date not in closes_df.index:
         return []
@@ -402,6 +426,8 @@ def _score_etfs_on_date(closes_df, opens_df, ma60_df, etf_pool, date, scheme, ex
     ma60_today = ma60_df.loc[date] if date in ma60_df.index else None
 
     scores = []
+    deviations = {}  # 先收集所有乖离率
+
     for code in closes_df.columns:
         try:
             price_now = closes_today[code]
@@ -425,7 +451,15 @@ def _score_etfs_on_date(closes_df, opens_df, ma60_df, etf_pool, date, scheme, ex
             if pd.isna(gain) or pd.isna(up):
                 continue
 
-            score = w1 * gain + w2_val * up
+            base_score = w1 * gain + w2_val * up
+
+            # 计算乖离率
+            dev = None
+            if len(code_closes) >= 20:
+                dev_series = calc_deviation_rate(code_closes, ma_period=20)
+                if pd.notna(dev_series.iloc[-1]):
+                    dev = round(float(dev_series.iloc[-1]), 4)
+                    deviations[code] = dev
 
             # 获取名称
             name = code
@@ -443,13 +477,27 @@ def _score_etfs_on_date(closes_df, opens_df, ma60_df, etf_pool, date, scheme, ex
                 'code': code,
                 'name': name,
                 'sector': sector,
-                'score': round(score, 2),
+                'score': round(base_score, 2),
                 'gain': round(gain, 2),
                 'up_days': int(up),
                 'price': float(price_now),
+                'deviation_20d': dev,
             })
         except Exception:
             continue
+
+    # 计算乖离率中位数并应用惩罚
+    dev_values = [s['deviation_20d'] for s in scores if s['deviation_20d'] is not None]
+    if dev_values:
+        median_dev = float(np.median(dev_values))
+        for s in scores:
+            dev = s['deviation_20d']
+            if dev is not None and dev > median_dev:
+                penalty = w3 * (dev - median_dev)
+                s['score'] = round(s['score'] - penalty, 2)
+                s['deviation_penalty'] = round(penalty, 4)
+            else:
+                s['deviation_penalty'] = 0.0
 
     # 板块去重：每个板块只保留评分最高的
     sector_best = {}
@@ -504,6 +552,7 @@ def run_backtest_v2(etf_pool=None, valid_codes=None, extra_name_map=None):
         opens[code] = df['open'].reindex(date_index).ffill()
 
     ma60 = closes.apply(calc_ma60)
+    ma5 = closes.apply(calc_ma5)
 
     # 基准：510300
     benchmark_data = load_cached_data('510300')
@@ -554,7 +603,11 @@ def run_backtest_v2(etf_pool=None, valid_codes=None, extra_name_map=None):
 
         # 初始化持仓
         holdings = {}  # code -> {'shares': float, 'cost_price': float, 'name': str}
+        cash = INITIAL_CAPITAL  # 账户现金
         total_asset = INITIAL_CAPITAL
+
+        # 初始化分层止损管理器
+        stop_loss_mgr = LayeredStopLossManager()
 
         # 获取基准初始价格
         if benchmark_closes is not None and year_start in benchmark_closes.index:
@@ -571,41 +624,105 @@ def run_backtest_v2(etf_pool=None, valid_codes=None, extra_name_map=None):
         first_rebalance = True
         prev_date = trading_dates[0]
 
+        def _calc_market_value(holdings_dict, as_of_date):
+            """计算持仓市值"""
+            mv = 0
+            for code, h in holdings_dict.items():
+                if code in closes.columns and as_of_date in closes.index:
+                    price = closes.loc[as_of_date, code]
+                    if pd.notna(price):
+                        mv += h['shares'] * price
+                    else:
+                        mv += h['shares'] * h['cost_price']
+                else:
+                    mv += h['shares'] * h['cost_price']
+            return mv
+
         for date in trading_dates:
             is_rebalance_day = date in week_last_days
 
             if is_rebalance_day:
                 # 计算当前持仓市值
-                market_value = 0
-                for code, h in holdings.items():
-                    if code in closes.columns and date in closes.index:
-                        price = closes.loc[date, code]
-                        if pd.notna(price):
-                            market_value += h['shares'] * price
-                        else:
-                            market_value += h['shares'] * h['cost_price']
-                    else:
-                        market_value += h['shares'] * h['cost_price']
+                market_value = _calc_market_value(holdings, date)
 
-                total_asset = market_value if not first_rebalance else INITIAL_CAPITAL
+                # total_asset = 持仓市值 + 现金
+                total_asset = market_value + cash
 
-                # 基准市值
-                benchmark_asset = INITIAL_CAPITAL
-                if benchmark_closes is not None and date in benchmark_closes.index and benchmark_init_price and benchmark_init_price > 0:
-                    benchmark_asset = benchmark_shares * benchmark_closes[date]
+                # ====== 换仓日风控检查（卖旧仓后、买新仓前） ======
+                if holdings and not first_rebalance:
+                    price_data = {}
+                    ma5_data = {}
+                    for code in holdings:
+                        if code in closes.columns and date in closes.index:
+                            p = closes.loc[date, code]
+                            if pd.notna(p):
+                                price_data[code] = float(p)
+                        if code in ma5.columns and date in ma5.index:
+                            m5 = ma5.loc[date, code]
+                            if pd.notna(m5):
+                                ma5_data[code] = float(m5)
+
+                    risk_result = stop_loss_mgr.run_daily_check(
+                        holdings, price_data, ma5_data, total_asset,
+                        date=date.strftime('%Y-%m-%d')
+                    )
+
+                    if risk_result['final_action'] == 'full_liquidate':
+                        # 组合止损：全部清仓，回笼现金
+                        for code, h in holdings.items():
+                            sell_price = price_data.get(code, h['cost_price'])
+                            sell_amount = h['shares'] * sell_price
+                            cash += sell_amount
+                            trade_records_scheme.append((
+                                date.strftime('%Y-%m-%d'), 'sell', code, h['name'],
+                                round(float(sell_price), 4), round(h['shares'], 2),
+                                round(sell_amount, 2), scheme
+                            ))
+                        holdings = {}
+                        market_value = 0
+                        total_asset = cash
+
+                    elif risk_result['final_action'] == 'partial_reduce':
+                        # 个股止损：减仓，回笼现金
+                        for code, reduce_to in risk_result['reduce_codes'].items():
+                            if code in holdings:
+                                h = holdings[code]
+                                target_shares = round(h['shares'] * reduce_to, 2)
+                                sell_shares = round(h['shares'] - target_shares, 2)
+                                sell_price = price_data.get(code, h['cost_price'])
+                                sell_amount = round(sell_shares * sell_price, 2)
+                                cash += sell_amount
+                                trade_records_scheme.append((
+                                    date.strftime('%Y-%m-%d'), 'sell', code, h['name'],
+                                    round(float(sell_price), 4), sell_shares,
+                                    sell_amount, scheme
+                                ))
+                                holdings[code] = {
+                                    'shares': target_shares,
+                                    'cost_price': h['cost_price'],
+                                    'name': h['name'],
+                                }
+                        market_value = _calc_market_value(holdings, date)
+                        total_asset = market_value + cash
+                # ====== 换仓日风控检查结束 ======
 
                 # 评分选股
                 top3 = _score_etfs_on_date(closes, opens, ma60, etf_pool, date, scheme, extra_name_map)
 
+                # 组合止损触发后，保守再入场判断
+                if not stop_loss_mgr.portfolio_stop.should_reentry(top3):
+                    top3 = []  # 不入场，保持空仓
+
                 if top3:
                     old_codes = set(holdings.keys())
                     new_codes = set(t['code'] for t in top3)
-                    target_per_etf = total_asset / N_TOP_V2
+                    target_per_etf = total_asset / len(top3)  # 按实际数量等权分配
 
-                    # 卖出：不在新 Top3 中的
+                    # 卖出：不在新 Top3 中的，回笼现金
                     for code in old_codes - new_codes:
                         price = closes.loc[date, code] if (code in closes.columns and date in closes.index) else holdings[code]['cost_price']
                         amount = holdings[code]['shares'] * price
+                        cash += amount  # 卖出回笼现金
                         trade_records_scheme.append((
                             date.strftime('%Y-%m-%d'), 'sell', code,
                             holdings[code]['name'], round(float(price), 4),
@@ -627,6 +744,8 @@ def run_backtest_v2(etf_pool=None, valid_codes=None, extra_name_map=None):
                             # 继续持有（调整仓位）
                             old_shares = holdings[code]['shares']
                             shares_diff = shares - old_shares
+                            # 调仓：买入差额用现金，卖出差额回笼现金
+                            cash -= shares_diff * price
                             action = 'hold'
                             # 仍记录一笔 hold 以追踪
                             trade_records_scheme.append((
@@ -636,6 +755,7 @@ def run_backtest_v2(etf_pool=None, valid_codes=None, extra_name_map=None):
                             ))
                         else:
                             # 新买入
+                            cash -= target_per_etf  # 扣除买入金额
                             action = 'buy'
                             trade_records_scheme.append((
                                 date.strftime('%Y-%m-%d'), action, code, name,
@@ -652,19 +772,75 @@ def run_backtest_v2(etf_pool=None, valid_codes=None, extra_name_map=None):
                     holdings = new_holdings
                     first_rebalance = False
 
+                    # 换仓日重置风控追踪状态
+                    stop_loss_mgr.on_rebalance(list(holdings.keys()))
+
             # 每日计算账户市值
-            if not first_rebalance and holdings:
-                market_value = 0
-                for code, h in holdings.items():
-                    if code in closes.columns and date in closes.index:
-                        price = closes.loc[date, code]
-                        if pd.notna(price):
-                            market_value += h['shares'] * price
-                        else:
-                            market_value += h['shares'] * h['cost_price']
-                    else:
-                        market_value += h['shares'] * h['cost_price']
-                total_asset = market_value
+            if not first_rebalance:
+                market_value = _calc_market_value(holdings, date)
+                total_asset = market_value + cash
+
+                # ====== 每日风控检查（非换仓日执行，换仓日在上方已检查） ======
+                if holdings and not is_rebalance_day:
+                    price_data = {}
+                    ma5_data = {}
+                    for code in holdings:
+                        if code in closes.columns and date in closes.index:
+                            p = closes.loc[date, code]
+                            if pd.notna(p):
+                                price_data[code] = float(p)
+                        if code in ma5.columns and date in ma5.index:
+                            m5 = ma5.loc[date, code]
+                            if pd.notna(m5):
+                                ma5_data[code] = float(m5)
+
+                    risk_result = stop_loss_mgr.run_daily_check(
+                        holdings, price_data, ma5_data, total_asset,
+                        date=date.strftime('%Y-%m-%d')
+                    )
+
+                    if risk_result['final_action'] == 'full_liquidate':
+                        # 组合止损：全部清仓，回笼现金
+                        for code, h in holdings.items():
+                            sell_price = price_data.get(code, h['cost_price'])
+                            sell_amount = h['shares'] * sell_price
+                            cash += sell_amount  # 清仓回笼现金
+                            trade_records_scheme.append((
+                                date.strftime('%Y-%m-%d'), 'sell', code, h['name'],
+                                round(float(sell_price), 4), round(h['shares'], 2),
+                                round(sell_amount, 2), scheme
+                            ))
+                        holdings = {}
+                        market_value = 0
+                        total_asset = cash  # 清仓后资产 = 现金
+
+                    elif risk_result['final_action'] == 'partial_reduce':
+                        # 个股止损：减仓，回笼现金
+                        for code, reduce_to in risk_result['reduce_codes'].items():
+                            if code in holdings:
+                                h = holdings[code]
+                                target_shares = round(h['shares'] * reduce_to, 2)
+                                sell_shares = round(h['shares'] - target_shares, 2)
+                                sell_price = price_data.get(code, h['cost_price'])
+                                sell_amount = round(sell_shares * sell_price, 2)
+                                cash += sell_amount  # 减仓回笼现金
+                                trade_records_scheme.append((
+                                    date.strftime('%Y-%m-%d'), 'sell', code, h['name'],
+                                    round(float(sell_price), 4), sell_shares,
+                                    sell_amount, scheme
+                                ))
+                                # 更新持仓
+                                holdings[code] = {
+                                    'shares': target_shares,
+                                    'cost_price': h['cost_price'],
+                                    'name': h['name'],
+                                }
+                        # 重新计算总资产
+                        market_value = _calc_market_value(holdings, date)
+                        total_asset = market_value + cash
+
+                # ====== 风控检查结束 ======
+
             elif first_rebalance:
                 total_asset = INITIAL_CAPITAL
 
