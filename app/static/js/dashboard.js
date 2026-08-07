@@ -467,27 +467,48 @@ function calculateMaxConsecutiveHold(history) {
   return maxLen > 0 ? `${maxLen}周` : '--';
 }
 
-// ========== 手动刷新 ==========
+// ========== 手动刷新（异步轮询）==========
 async function triggerRefresh() {
   const btn = document.getElementById('btn-refresh');
   btn.disabled = true;
   btn.textContent = '⏳ 刷新中...';
+
   try {
     const resp = await fetch('/api/refresh', { method: 'POST' });
     const data = await resp.json();
-    if (data.status === 'ok') {
-      btn.textContent = '✅ 已刷新';
-      setTimeout(loadAll, 500);
+
+    if (data.status === 'started' || data.status === 'busy') {
+      // 后台更新已启动，每5秒轮询一次状态
+      pollRefreshStatus(btn);
     } else {
+      // skip / error
       btn.textContent = '⚠ ' + (data.message || '跳过');
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = '🔄 刷新'; }, 4000);
     }
   } catch (e) {
     btn.textContent = '❌ 刷新失败';
-  }
-  setTimeout(() => {
     btn.disabled = false;
-    btn.textContent = '🔄 刷新';
-  }, 3000);
+    setTimeout(() => { btn.textContent = '🔄 刷新'; }, 3000);
+  }
+}
+
+async function pollRefreshStatus(btn) {
+  try {
+    const resp = await fetch('/api/refresh/status');
+    const data = await resp.json();
+    if (data.running) {
+      setTimeout(() => pollRefreshStatus(btn), 5000);
+    } else {
+      btn.textContent = '✅ 已刷新';
+      btn.disabled = false;
+      setTimeout(loadAll, 300);
+      setTimeout(() => { btn.textContent = '🔄 刷新'; }, 3000);
+    }
+  } catch (e) {
+    // 网络抖动，继续重试
+    setTimeout(() => pollRefreshStatus(btn), 5000);
+  }
 }
 
 // ========== CSV导出 ==========

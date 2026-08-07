@@ -1,31 +1,27 @@
 # AiToEarn — ETF 板块轮动实时仪表盘
 
 ## 当前状态
-- **前复权+风控+现金追踪修复完成**（2026-07-19），回测结果恢复正常
-- **全量数据回填完成**（2026-07-16），99/100 只 ETF 成功，2020-01-01 ~ 2026-07-16
-- **三级数据源降级策略**：akshare（主）→ efinance.fund（降级）→ baostock（最终备选）
-- SQLite 数据库已重建，评分历史/回测净值/换仓记录均已更新
+- **数据更新到 2026-08-07**（本次会话），100/100 ETF 成功，efinance 为主力数据源
+- **akshare `fund_etf_hist_em` 接口已失效**（ConnectionError），已做 fast-fail 处理快速降级
+- **刷新异步化**：refresh.py 改为后台线程+轮询，不再阻塞 HTTP 请求
+- **Flask 修复**：debug=False + use_reloader=False，避免文件写入时触发重启
+- **启动自动检测**：Flask 启动时判断数据是否落后，落后则后台补充更新
 - Flask 应用运行中 http://127.0.0.1:5001/
-- 99 只 ETF 参与评分，V1/V2 回测已完成
+- V2 当前持仓（方案B）：酒ETF鹏华、生物医药ETF天弘、红利国企ETF国泰
 
-## 全量回填结果（2026-07-16）
-- 拉取成功率：99/100（99%），仅 560730 N红利低波ETF国泰海通 失败
-- 数据源分布：akshare 7只，efinance 92只（efinance 承担了主要降级角色）
-- 日期范围：2020-01-01 ~ 2026-07-16
-
-### V1 回测（Top8 等权，2020-01 ~ 2026-07，前复权数据）
+### V1 回测（Top8 等权，2020-01 ~ 2026-08，前复权数据）
 | 方案 | 累计收益 | 年化收益 | 夏普 | 最大回撤 |
 |------|---------|---------|------|---------|
-| A 激进 | +333.38% | 25.15% | 0.93 | -24.37% |
-| B 平衡 | +361.44% | 26.36% | 0.98 | -24.76% |
-| C 稳健 | +385.45% | 27.35% | 1.03 | -22.80% |
+| A 激进 | +322.81% | 24.42% | 0.88 | -26.20% |
+| B 平衡 | +336.75% | 25.03% | 0.91 | -26.70% |
+| C 稳健 | +346.59% | 25.45% | 0.93 | -26.78% |
 
-### V2 回测（30万本金 Top3，2026年至今，前复权+风控+现金追踪修复）
+### V2 回测（30万本金 Top3，2026-01 ~ 2026-08-07，前复权+风控）
 | 方案 | 总资产 | 累计收益 | 夏普 | 最大回撤 |
 |------|--------|----------|------|----------|
-| A 激进 | ¥438,247 | +46.08% | 1.79 | -15.58% |
-| B 平衡 | ¥417,903 | +39.30% | 1.60 | -17.46% |
-| C 稳健 | ¥319,102 | +6.37% | 0.40 | -17.82% |
+| A 激进 | ¥358,898 | +19.63% | 0.85 | -19.25% |
+| B 平衡 | ¥356,561 | +18.85% | 0.82 | -19.21% |
+| C 稳健 | ¥337,867 | +12.62% | 0.61 | -20.26% |
 
 ## 项目结构
 ```
@@ -150,39 +146,59 @@ AiToEarn/
 20. **风控 triggered 标志修复**: PortfolioTrailingStop.reset_period() 同时重置 triggered=False 和 trigger_date=None，允许换仓后重新触发
 21. **换仓日风控检查**: rebalance day 分支开头增加风控检查，先检查止损再执行新交易
 22. **端口 5001**: macOS AirPlay 占用 5000，统一改为 5001（config.py/Dockerfile/docker-compose.yml）
+23. **akshare hist fast-fail**: fund_etf_hist_em 接口失效，ConnectionError/ChunkedEncodingError 直接 re-raise，不重试，快速降级到 efinance
+24. **efinance 增量最小行数修复**: _try_fetch_etf 对 efinance 的检查从 MIN_DATA_ROWS(65) 改为 >0，因为 efinance 下载全量历史再按日期过滤，增量更新只有几十行是正常的
+25. **刷新异步化**: refresh.py 用后台线程执行 run_update()，立即返回 {status:'started'}；前端每 5s 轮询 /api/refresh/status；刷新完成后自动 loadAll()
+26. **Flask 稳定化**: FLASK_DEBUG=False + use_reloader=False，避免 CSV 写入触发重启
+27. **启动检测 bug 修复**: scheduler.py 的 ScoreHistoryModel.get_latest 返回 (list, date) 元组，需解包获取日期；调用需传 session='final', scheme='B' 关键字参数
 
-## 技术依赖（已全部安装）
-- Python 3.9.6+
-- Flask 3.1.3 ✅
-- schedule 1.2.2 ✅
-- Plotly 6.8.0 ✅
-- baostock ✅
-- akshare 1.18.60 ✅
-- efinance ✅
-- pandas 2.3.3 ✅
-- SQLite（Python 内置）
+## 新设备部署步骤
 
-## 数据库表
-| 表名 | 用途 |
-|------|------|
-| score_history | 评分历史（每日，含乖离率和最终评分） |
-| equity_curve | V1回测净值 |
-| equity_curve_v2 | V2回测净值（30万本金） |
-| trade_history | V2换仓记录（buy/sell/hold） |
-| risk_control_log | 风控事件日志（个股层/组合层） |
-| data_quality_log | 数据质量日志 |
-| trades | 个人交易（已弃用，表保留） |
-| holdings | 个人持仓（已弃用，表保留） |
-| daily_pnl | 每日盈亏（已弃用，表保留） |
+> **注意**：`db/aitorearn.db`（数据库）和 `data/`（ETF K线CSV缓存）均在 `.gitignore` 中，
+> 新设备 clone 后这两者为空，必须按以下步骤初始化。
+
+### 1. 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 全量初始化（首次必须执行，耗时约 15–25 分钟）
+```bash
+python3 -u daily_update.py 2>&1 | tee /tmp/init.log
+```
+- 自动创建 SQLite 数据库（从 `db/schema.sql`）
+- 从 efinance 下载 100 只 ETF 的全量历史数据（2020 至今）到 `data/`
+- 计算评分、V1/V2 回测，写入数据库
+- 进度实时输出到终端和 `/tmp/init.log`
+- 成功标志：最后一行出现 `更新完成!`，成功率显示 `100/100 (100.0%)`
+
+### 3. 启动 Flask
+```bash
+python3 app.py
+```
+访问 http://127.0.0.1:5001/
+
+### 注意事项
+- **端口 5001**：macOS AirPlay 占用 5000，已改用 5001；如需改端口设 `PORT=xxxx` 环境变量
+- **akshare hist 接口已失效**：程序已自动 fast-fail 降级到 efinance，无需手动处理
+- **每日更新**：Flask 启动后调度器自动在 14:30（盘中）和 15:30（收盘后）触发；启动时若数据落后也会自动后台补充
+- **手动刷新**：点页面右上角 🔄 刷新按钮（异步执行，完成后自动刷新页面）
+- **Python 版本**：3.9+（项目在 3.9-slim 镜像中测试通过）
+
+### Docker 部署（可选）
+```bash
+docker compose up -d
+```
+- 数据目录通过 volume 持久化，首次启动同样需要等待全量初始化完成
+- 初始化日志：`docker compose logs -f`
 
 ## 下一步待做
-1. **Docker 部署到 Mac mini**: 使用项目根目录的 Dockerfile + docker-compose.yml
-2. **增量更新到最新交易日**: 工作日运行 `python daily_update.py`
-3. **前端展示风控事件**: 仪表盘增加风控日志展示区域
+1. **每日增量更新**: 工作日 15:30 定时调度自动运行，也可手动点刷新
+2. **前端展示风控事件**: 仪表盘增加风控日志展示区域
 
 ## 已知问题
-- 每次数据更新约 4-6 只 ETF 网络请求失败（akshare API 不稳定，失败 ETF 不会进 Top 3）
-- baostock 交叉校验 9/10 通过，失败的具体 ETF 和偏差值已加入打印（daily_update.py）
+- akshare `fund_etf_hist_em` 接口失效（2026-08 起），已 fast-fail 降级到 efinance，不影响更新
+- baostock 层目前也用 akshare 实现（等价于第二次尝试 akshare），实际无效；efinance 承担了所有降级工作
 
 ## 会话历史
 - 2026-06-18: 项目初始化，完成 ETF 板块轮动策略首次回测(34只ETF)
@@ -201,3 +217,5 @@ AiToEarn/
 - 2026-07-16: **项目清理** — 删除原始脚本(etf_rotation_backtest.py/fetch_missing.py/run_update.sh)、旧回测结果(results/)、一次性回填脚本(backfill_data.py/backfill_full.py)、浏览器调试文件(.playwright-mcp/)、截图文件；保留策略.md和需求文档.docx
 - 2026-07-17: **风控模块集成** — 新增 core/risk_control.py（分层止损+乖离率惩罚）；config.py 增加风控参数和DEVIATION_WEIGHTS；indicators.py 集成三因子评分；backtest.py V2回测集成每日风控检查；db 新增 risk_control_log 表 + score_history 6个新字段；daily_update 增加风控步骤
 - 2026-07-19: **回测数据修复** — 1)新增 core/adjust.py 前复权模块（24只ETF共27处除权跳变全部消除）；2)修复V2回测现金追踪bug（减仓/清仓现金丢失）；3)修复风控triggered标志不重置bug；4)修复换仓日跳过风控检查bug；5)端口5000→5001；V1回测收益从~126%升至~361%，V2回测从-11%升至+39%（方案B）
+- 2026-08-07: **数据更新+刷新机制修复** — 1)akshare hist接口完全失效，fast-fail快速降级；2)efinance增量检查MIN_DATA_ROWS=65错误导致100%失败，修复为>0；3)refresh.py改为异步（后台线程+轮询）；4)Flask改debug=False+use_reloader=False；5)修复启动检测get_latest参数bug；全量更新至2026-08-07，100/100成功
+- 2026-08-08: **板块分类修复** — config.py 将"有色""矿业"从煤炭板块独立为"有色金属"板块，"化工"独立为"化工"板块；补充新设备部署说明到CLAUDE.md

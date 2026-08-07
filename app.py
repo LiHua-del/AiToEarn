@@ -40,4 +40,4 @@ print(f"""
 if __name__ == '__main__':
     host = os.environ.get('HOST', FLASK_HOST)
     port = int(os.environ.get('PORT', FLASK_PORT))
-    app.run(host=host, port=port, debug=FLASK_DEBUG)
+    app.run(host=host, port=port, debug=FLASK_DEBUG, use_reloader=False)

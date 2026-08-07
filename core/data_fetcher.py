@@ -113,7 +113,10 @@ def get_etf_pool():
 # ============================================================
 
 def fetch_etf_hist_ak(code, start_str, end_str, max_retries=MAX_RETRIES):
-    """通过 akshare 获取单只 ETF 历史数据，带指数退避重试"""
+    """通过 akshare 获取单只 ETF 历史数据，带指数退避重试
+    ConnectionError/RemoteDisconnected 视为服务器不可达，不重试直接抛出（快速降级到下一数据源）
+    """
+    import requests as _req
     for attempt in range(max_retries):
         try:
             hist = ak.fund_etf_hist_em(
@@ -121,6 +124,9 @@ def fetch_etf_hist_ak(code, start_str, end_str, max_retries=MAX_RETRIES):
                 start_date=start_str, end_date=end_str
             )
             return hist
+        except (_req.exceptions.ConnectionError, _req.exceptions.ChunkedEncodingError) as e:
+            # 服务器不可达，立即放弃，快速降级到 efinance
+            raise e
         except Exception as e:
             if attempt < max_retries - 1:
                 wait = RETRY_BASE ** attempt + 1
@@ -245,7 +251,8 @@ def _try_fetch_etf(code, start_str, end_str, source='akshare'):
 
         elif source == 'efinance':
             df = fetch_etf_hist_efinance(code, start_str, end_str)
-            if df is None or len(df) < MIN_DATA_ROWS:
+            # efinance 内部已下载全量历史再按日期过滤，增量更新时行数少是正常的，只要 > 0 即可
+            if df is None or len(df) < 1:
                 return None, f"efinance数据不足({len(df) if df is not None else 0}行)"
             return df, f"efinance成功({len(df)}行)"
 
