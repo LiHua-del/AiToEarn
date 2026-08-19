@@ -21,11 +21,13 @@ def create_app():
     from app.routes.equity import equity_bp
     from app.routes.refresh import refresh_bp
     from app.routes.trade_history import trade_bp
+    from app.routes.historical import historical_bp
 
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(ranking_bp, url_prefix='/api')
     app.register_blueprint(equity_bp, url_prefix='/api')
     app.register_blueprint(refresh_bp, url_prefix='/api')
     app.register_blueprint(trade_bp, url_prefix='/api')
+    app.register_blueprint(historical_bp, url_prefix='/api')
 
     return app

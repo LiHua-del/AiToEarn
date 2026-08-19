@@ -64,7 +64,92 @@ function loadAll() {
     loadCurrentHoldings(),
     loadTradeHistory(),
     loadStrategyStats(),
+    loadHistoricalBacktest(),
   ]).catch(err => console.error('loadAll error:', err));
+}
+
+// ========== 五年历史回测 ==========
+async function loadHistoricalBacktest() {
+  const chartEl = document.getElementById('chart-history');
+  if (!chartEl) return;
+  try {
+    const resp = await fetch(`/api/historical?scheme=${currentScheme}`);
+    const data = await resp.json();
+    if (!resp.ok) {
+      chartEl.innerHTML = `<div class="text-muted p-4">${data.error || '历史回测尚未生成'}</div>`;
+      return;
+    }
+
+    const summary = data.summary || {};
+    const quality = data.quality || {};
+    document.getElementById('hist-period').textContent =
+      `${data.period.start} — ${data.period.end} · 方案${data.scheme}`;
+    document.getElementById('hist-final-asset').textContent = '¥' + formatNum(summary.final_asset);
+    setMetricPct('hist-cum-return', summary.cumulative_return_pct);
+    document.getElementById('hist-max-dd').textContent = `${Number(summary.max_drawdown_pct || 0).toFixed(2)}%`;
+    document.getElementById('hist-data-quality').textContent = `${quality.usable || 0}/${quality.requested || 0} 只`;
+
+    Plotly.newPlot('chart-history', [{
+      x: data.dates || [], y: data.assets || [], type: 'scatter', mode: 'lines',
+      name: `方案${data.scheme}`, line: { color: '#1f78b4', width: 2.4 },
+      fill: 'tozeroy', fillcolor: 'rgba(37,99,235,.08)',
+      hovertemplate: '%{x|%Y-%m-%d}<br>资产 ¥%{y:,.0f}<extra></extra>',
+    }], {
+      title: { text: `30万元连续复利曲线 · 方案${data.scheme}`, font: { size: 14 } },
+      xaxis: { tickformat: '%Y-%m', gridcolor: '#edf1f4' },
+      yaxis: { title: '账户资产（元）', tickformat: ',.0f', gridcolor: '#edf1f4' },
+      hovermode: 'x', template: 'plotly_white', showlegend: false,
+      margin: { l: 65, r: 20, t: 45, b: 45 }, height: 430,
+    }, { responsive: true, displaylogo: false });
+
+    const annualBody = document.getElementById('history-annual-body');
+    annualBody.innerHTML = '';
+    (data.annual || []).forEach(row => {
+      const tr = document.createElement('tr');
+      const returnClass = row.return_pct >= 0 ? 'return-up' : 'return-down';
+      tr.innerHTML = `<td><strong>${row.year}${row.is_partial ? ' YTD' : ''}</strong></td>
+        <td>¥${formatNum(row.start_asset)}</td><td>¥${formatNum(row.end_asset)}</td>
+        <td class="${returnClass}">${row.return_pct >= 0 ? '+' : ''}${row.return_pct.toFixed(2)}%</td>
+        <td class="return-down">${row.max_drawdown_pct.toFixed(2)}%</td>`;
+      annualBody.appendChild(tr);
+    });
+
+    document.getElementById('history-quality').innerHTML = `
+      <div class="quality-item"><span>可用 ETF</span><strong>${quality.usable || 0} / ${quality.requested || 0}</strong></div>
+      <div class="quality-item"><span>完整五年覆盖</span><strong>${quality.full_five_year_coverage || 0} 只</strong></div>
+      <div class="quality-item"><span>已处理公司行动</span><strong>${quality.corporate_actions_adjusted || 0} 次</strong></div>
+      <div class="quality-item"><span>保留极端行情</span><strong>${quality.large_moves_kept || 0} 次</strong></div>
+      <div class="quality-item"><span>交易成本</span><strong>单边 ${(Number(data.methodology.trade_cost_each_side) * 100).toFixed(2)}%</strong></div>
+      <div class="quality-item"><span>生成时间</span><strong>${data.generated_at.slice(0, 10)}</strong></div>`;
+    document.getElementById('history-limitations').innerHTML =
+      `<strong>数据源：</strong>${quality.source || '--'}<br>` +
+      (quality.limitations || []).map(x => `• ${x}`).join('<br>');
+
+    const anomalies = data.anomalies || [];
+    document.getElementById('anomaly-count').textContent = `${anomalies.length} 条`;
+    const anomalyEl = document.getElementById('history-anomalies');
+    anomalyEl.innerHTML = '';
+    anomalies.slice(0, 40).forEach(item => {
+      const div = document.createElement('div');
+      div.className = `anomaly-item ${item.action || ''}`;
+      const typeLabel = item.type === 'cash_dividend' ? '现金分红' :
+        item.type === 'share_split_or_scale_change' ? '份额折算' :
+        item.type === 'large_market_move' ? '极端行情' : '数据异常';
+      div.innerHTML = `<div class="top"><span>${item.code} ${item.name || ''}</span><span>${item.move_pct == null ? '' : item.move_pct + '%'}</span></div>
+        <div class="detail">${item.date} · ${typeLabel} · ${item.action === 'adjusted' ? '已复权' : item.action === 'kept' ? '规则核验后保留' : item.action}</div>`;
+      anomalyEl.appendChild(div);
+    });
+  } catch (e) {
+    console.error('loadHistoricalBacktest error:', e);
+    chartEl.innerHTML = '<div class="text-muted p-4">历史回测加载失败</div>';
+  }
+}
+
+function setMetricPct(id, value) {
+  const el = document.getElementById(id);
+  const n = Number(value || 0);
+  el.textContent = `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  el.className = n >= 0 ? 'return-up' : 'return-down';
 }
 
 // ========== 区域2：账户总览 ==========

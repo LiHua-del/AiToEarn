@@ -76,8 +76,9 @@ def filter_etf_pool(df):
     df = df[mask].copy()
 
     # 过滤2：剔除跨境 ETF
-    cross_kw = ['美国', '纳指', '日经', '恒生', '德国', '法国', '越南', '黄金', '石油', '原油',
-                '港股', '港', '标普', 'DAX', '日兴', 'TOPIX']
+    cross_kw = ['美国', '纳指', '纳斯达克', '道琼斯', '日经', '恒生', '德国', '法国', '越南',
+                '黄金', '石油', '原油', '港股', '港', '标普', 'DAX', '日兴', 'TOPIX', '跨境',
+                '中概', '海外', '全球']
     mask = df['name'].apply(lambda n: not any(k in n for k in cross_kw))
     df = df[mask].copy()
 

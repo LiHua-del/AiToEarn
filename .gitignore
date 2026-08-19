@@ -1,5 +1,6 @@
 # Data files (CSV cache, 99 ETF files)
-data/
+/data/
+history_data/
 
 # SQLite database
 db/aitorearn.db
