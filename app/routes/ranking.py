@@ -1,6 +1,7 @@
 """ETF 排行 API"""
 from flask import Blueprint, jsonify, request
 from db.models import ScoreHistoryModel
+from core.indicators import select_top_n
 
 ranking_bp = Blueprint('ranking', __name__)
 
@@ -12,12 +13,14 @@ def get_ranking():
     limit = int(request.args.get('limit', 0))
 
     scores, latest_date = ScoreHistoryModel.get_latest(session=session, scheme=scheme, limit=limit)
+    action_codes = [item['code'] for item in select_top_n(scores, n=3)]
 
     return jsonify({
         'date': latest_date,
         'session': session,
         'scheme': scheme,
         'count': len(scores),
+        'action_codes': action_codes,
         'scores': scores,
     })
 

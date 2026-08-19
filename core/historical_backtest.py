@@ -241,7 +241,7 @@ def _annual_stats(curve: pd.Series, initial_capital: float = INITIAL_CAPITAL) ->
 
 
 def run_five_year_backtest(data: dict[str, pd.DataFrame], quality: dict,
-                           events: list[dict]) -> dict:
+                           events: list[dict], backtest_start: str = BACKTEST_START) -> dict:
     all_dates = sorted(set().union(*(set(frame.index) for frame in data.values())))
     index = pd.DatetimeIndex(all_dates)
     end_date = pd.Timestamp(quality["common_latest_date"])
@@ -254,7 +254,7 @@ def run_five_year_backtest(data: dict[str, pd.DataFrame], quality: dict,
     closes = close_raw.ffill()
     opens = open_raw.ffill()
     ma60 = closes.rolling(60, min_periods=60).mean()
-    dates = index[index >= pd.Timestamp(BACKTEST_START)]
+    dates = index[index >= pd.Timestamp(backtest_start)]
     week_last = pd.Series(dates, index=dates).groupby([dates.isocalendar().year, dates.isocalendar().week]).last().tolist()
     week_last = set(pd.Timestamp(x) for x in week_last)
 
@@ -348,7 +348,7 @@ def run_five_year_backtest(data: dict[str, pd.DataFrame], quality: dict,
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "period": {"start": BACKTEST_START, "end": quality["common_latest_date"]},
+        "period": {"start": backtest_start, "end": quality["common_latest_date"]},
         "initial_capital": INITIAL_CAPITAL,
         "methodology": {"top_n": TOP_N, "rebalance": "每周最后一个交易日尾盘",
                         "compounding": "30万元一次投入，跨年度连续复利",
@@ -364,6 +364,12 @@ def run_five_year_backtest(data: dict[str, pd.DataFrame], quality: dict,
 def generate(refresh: bool = False) -> dict:
     data, quality, events = prepare_history(refresh=refresh)
     result = run_five_year_backtest(data, quality, events)
+    ytd_start = f"{pd.Timestamp(quality['common_latest_date']).year}-01-01"
+    ytd_result = run_five_year_backtest(data, quality, events, backtest_start=ytd_start)
+    result["audited_ytd"] = {
+        "period": ytd_result["period"],
+        "schemes": ytd_result["schemes"],
+    }
     os.makedirs(os.path.dirname(RESULT_PATH), exist_ok=True)
     with open(RESULT_PATH, "w", encoding="utf-8") as handle:
         json.dump(result, handle, ensure_ascii=False, indent=2)

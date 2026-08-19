@@ -102,7 +102,13 @@
   <section class="history-section mb-3" id="history-backtest">
     <div class="section-heading history-heading">
       <div><span class="section-kicker">LONG-TERM VALIDATION</span><h2>五年历史回测</h2><p>30万元一次投入，跨年度连续复利；含双边交易成本、分红复权和异常审计。</p></div>
-      <div class="history-period" id="hist-period">数据加载中...</div>
+      <div class="history-heading-actions">
+        <div class="btn-group btn-group-sm" id="history-scope-toggle">
+          <button class="btn btn-outline-light active" data-history-scope="five_year">五年复利</button>
+          <button class="btn btn-outline-light" data-history-scope="ytd">2026 当年</button>
+        </div>
+        <div class="history-period" id="hist-period">数据加载中...</div>
+      </div>
     </div>
     <div class="row g-3 mb-3">
       <div class="col-6 col-lg-3"><div class="history-metric"><span>期末资产</span><strong id="hist-final-asset">--</strong></div></div>

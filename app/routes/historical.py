@@ -18,15 +18,22 @@ def historical_data():
     with open(RESULT_PATH, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     scheme = request.args.get("scheme", "B").upper()
+    scope = request.args.get("scope", "five_year").lower()
     if scheme not in payload.get("schemes", {}):
         scheme = "B"
+    selected_period = payload["period"]
+    selected_schemes = payload["schemes"]
+    if scope == "ytd" and payload.get("audited_ytd"):
+        selected_period = payload["audited_ytd"]["period"]
+        selected_schemes = payload["audited_ytd"]["schemes"]
     return jsonify({
         "generated_at": payload["generated_at"],
-        "period": payload["period"],
+        "period": selected_period,
         "initial_capital": payload["initial_capital"],
         "methodology": payload["methodology"],
         "quality": payload["quality"],
         "anomalies": payload["anomalies"],
         "scheme": scheme,
-        **payload["schemes"][scheme],
+        "scope": scope,
+        **selected_schemes[scheme],
     })

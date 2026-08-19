@@ -6,6 +6,7 @@
 // 全局状态
 let currentScheme = 'B';
 let currentRange = 'all';
+let currentHistoryScope = 'five_year';
 let currentHoldingCodes = new Set();
 let currentSellCodes = new Set();
 let currentNewEntryCodes = new Set();
@@ -36,6 +37,15 @@ function bindEvents() {
       btn.classList.add('active');
       currentRange = btn.dataset.range;
       loadEquityChart();
+    });
+  });
+
+  document.querySelectorAll('[data-history-scope]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-history-scope]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentHistoryScope = btn.dataset.historyScope;
+      loadHistoricalBacktest();
     });
   });
 
@@ -73,7 +83,7 @@ async function loadHistoricalBacktest() {
   const chartEl = document.getElementById('chart-history');
   if (!chartEl) return;
   try {
-    const resp = await fetch(`/api/historical?scheme=${currentScheme}`);
+    const resp = await fetch(`/api/historical?scheme=${currentScheme}&scope=${currentHistoryScope}`);
     const data = await resp.json();
     if (!resp.ok) {
       chartEl.innerHTML = `<div class="text-muted p-4">${data.error || '历史回测尚未生成'}</div>`;
@@ -95,7 +105,7 @@ async function loadHistoricalBacktest() {
       fill: 'tozeroy', fillcolor: 'rgba(37,99,235,.08)',
       hovertemplate: '%{x|%Y-%m-%d}<br>资产 ¥%{y:,.0f}<extra></extra>',
     }], {
-      title: { text: `30万元连续复利曲线 · 方案${data.scheme}`, font: { size: 14 } },
+      title: { text: `${currentHistoryScope === 'ytd' ? '2026年30万元独立起算' : '30万元连续复利曲线'} · 方案${data.scheme}`, font: { size: 14 } },
       xaxis: { tickformat: '%Y-%m', gridcolor: '#edf1f4' },
       yaxis: { title: '账户资产（元）', tickformat: ',.0f', gridcolor: '#edf1f4' },
       hovermode: 'x', template: 'plotly_white', showlegend: false,
@@ -242,6 +252,7 @@ async function loadRanking() {
     const resp = await fetch(`/api/ranking?scheme=${currentScheme}&session=${session}`);
     const data = await resp.json();
     const scores = data.scores || [];
+    const actionCodes = new Set(data.action_codes || []);
     const date = data.date;
 
     document.getElementById('ranking-date').textContent = date ? `(${date})` : '';
@@ -252,7 +263,8 @@ async function loadRanking() {
     scores.forEach((s, i) => {
       const rank = s[`rank_${currentScheme.toLowerCase()}`] || (i + 1);
       const score = s[`score_${currentScheme.toLowerCase()}`] || 0;
-      const rankClass = rank <= 3 ? `rank-${rank}` : '';
+      const actionRank = (data.action_codes || []).indexOf(s.code) + 1;
+      const rankClass = actionRank > 0 ? `rank-${actionRank}` : '';
       const maClass = s.above_ma60 ? 'above-ma' : 'below-ma';
 
       // 持仓状态
@@ -266,8 +278,8 @@ async function loadRanking() {
         statusHtml = '<span class="status-badge status-new">🟡 新进入</span>';
       }
 
-      // 前3名加操作角标
-      const actionBadge = rank <= 3 ? '<span class="badge bg-primary ms-1" style="font-size:0.6rem">操作</span>' : '';
+      // 只有板块去重后的 Top3 才是实际操作标的。
+      const actionBadge = actionCodes.has(code) ? `<span class="badge bg-primary ms-1" style="font-size:0.6rem">操作${actionRank}</span>` : '';
 
       const tr = document.createElement('tr');
       tr.className = rankClass;

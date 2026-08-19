@@ -36,6 +36,17 @@ class HistoricalBacktestTest(unittest.TestCase):
         self.assertEqual(len(data["annual"]), 6)
         self.assertEqual(data["quality"]["failed"], 0)
 
+    def test_history_ytd_api_uses_independent_capital(self):
+        client = create_app().test_client()
+        response = client.get("/api/historical?scheme=B&scope=ytd")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["period"]["start"], "2026-01-01")
+        self.assertEqual(data["initial_capital"], INITIAL_CAPITAL)
+        self.assertEqual(data["summary"]["initial_asset"], INITIAL_CAPITAL)
+        self.assertEqual(len(data["annual"]), 1)
+        self.assertEqual(data["annual"][0]["year"], 2026)
+
 
 if __name__ == "__main__":
     unittest.main()
